@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PrintBridge WebSocket Test Console</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }
+    .card { background: #1e293b; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }
+    h1 { color: #38bdf8; margin-top: 0; }
+    h2 { color: #94a3b8; font-size: 1.1rem; }
+    button { background: #0284c7; color: white; border: none; padding: 10px 18px; border-radius: 6px; font-weight: 600; cursor: pointer; margin-right: 8px; margin-bottom: 8px; }
+    button:hover { background: #0369a1; }
+    button.sec { background: #059669; }
+    button.sec:hover { background: #047857; }
+    select, input, textarea { background: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 8px 12px; font-size: 0.95rem; width: 100%; box-sizing: border-box; margin-bottom: 12px; }
+    .status-badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.85rem; font-weight: bold; }
+    .connected { background: #166534; color: #4ade80; }
+    .disconnected { background: #991b1b; color: #fca5a5; }
+    .paired { background: #0284c7; color: #e0f2fe; }
+    #log { background: #090d16; border: 1px solid #1e293b; border-radius: 6px; padding: 12px; font-family: monospace; font-size: 0.85rem; height: 240px; overflow-y: auto; color: #a7f3d0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  </style>
+</head>
+<body>
+  <h1>🖨️ PrintBridge Browser Test Console</h1>
+  
+  <div class="card">
+    <h2>1. Server Connection & Auth Pairing</h2>
+    <div>
+      Status: <span id="statusBadge" class="status-badge disconnected">Disconnected</span>
+      Auth: <span id="authBadge" class="status-badge disconnected">Unpaired</span>
+      <button onclick="connectWS()" style="margin-left: 16px;">Connect (ws://localhost:9567)</button>
+      <button onclick="disconnectWS()">Disconnect</button>
+    </div>
+    
+    <div style="margin-top: 16px;" class="grid">
+      <div>
+        <label>Pairing Handshake:</label>
+        <button class="sec" onclick="requestPairing()">1. Request Pairing Code</button>
+        <div style="display: flex; gap: 8px;">
+          <input type="text" id="codeInput" placeholder="Enter 6-Digit Code (e.g. 123456)" />
+          <button class="sec" onclick="confirmPairing()" style="white-space: nowrap;">2. Confirm Code</button>
+        </div>
+      </div>
+      <div>
+        <label for="tokenInput">Active Auth Token:</label>
+        <input type="text" id="tokenInput" placeholder="No token saved" />
+        <button onclick="authenticateToken()">Authenticate Stored Token</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>2. Discover Printers</h2>
+      <button onclick="listPrinters()">List System Printers</button>
+      <div style="margin-top: 12px;">
+        <label for="printerSelect">Select Target Printer:</label>
+        <select id="printerSelect"><option value="">Connect first...</option></select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3. Direct Raw Print Test</h2>
+      <label for="sampleTemplate">Payload Preset:</label>
+      <select id="sampleTemplate" onchange="loadPreset()">
+        <option value="escpos">ESC/POS Thermal Receipt (Text + Cut)</option>
+        <option value="zpl">ZPL Label (^XA...^XZ)</option>
+        <option value="custom">Custom Plain Text</option>
+      </select>
+      <label for="payloadInput">Raw Payload Content:</label>
+      <textarea id="payloadInput" rows="3">PrintBridge WebSocket Security Handshake Print Test\n\n\n</textarea>
+      <button onclick="sendPrint()">Send Print Job</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Console Logs & Real-Time Push Events</h2>
+    <div id="log">Click 'Connect' to begin...</div>
+  </div>
+
+  <script>
+    let ws = null;
+    let reqId = 1;
+    let savedToken = localStorage.getItem('printbridge_token') || '';
+
+    if (savedToken) {
+      document.getElementById('tokenInput').value = savedToken;
+    }
+
+    function log(msg, type = 'info') {
+      const logDiv = document.getElementById('log');
+      const time = new Date().toLocaleTimeString();
+      logDiv.innerHTML += `<div>[${time}] ${msg}</div>`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    function connectWS() {
+      if (ws) ws.close();
+      ws = new WebSocket('ws://localhost:9567/ws');
+
+      ws.onopen = () => {
+        document.getElementById('statusBadge').textContent = 'Connected';
+        document.getElementById('statusBadge').className = 'status-badge connected';
+        log('Connected to PrintBridge Agent at ws://localhost:9567');
+        
+        if (savedToken) {
+          authenticateToken();
+        } else {
+          listPrinters();
+        }
+      };
+
+      ws.onclose = () => {
+        document.getElementById('statusBadge').textContent = 'Disconnected';
+        document.getElementById('statusBadge').className = 'status-badge disconnected';
+        log('Disconnected from PrintBridge Agent');
+      };
+
+      ws.onerror = (err) => {
+        log('WebSocket Error: ' + JSON.stringify(err), 'error');
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        log(`RECEIVED: ${JSON.stringify(data)}`);
+
+        if (data.type === 'response') {
+          if (data.payload && data.payload.code) {
+            document.getElementById('codeInput').value = data.payload.code;
+            log(`PAIRING CODE ISSUED: ${data.payload.code}`);
+          }
+          if (data.payload && data.payload.token) {
+            savedToken = data.payload.token;
+            localStorage.setItem('printbridge_token', savedToken);
+            document.getElementById('tokenInput').value = savedToken;
+            setAuthStatus(true, 'Paired & Authenticated');
+          }
+          if (data.payload && data.payload.authenticated) {
+            setAuthStatus(true, 'Authenticated');
+          }
+          if (data.payload && data.payload.printers) {
+            const select = document.getElementById('printerSelect');
+            select.innerHTML = '';
+            data.payload.printers.forEach(p => {
+              const opt = document.createElement('option');
+              opt.value = p.name;
+              opt.textContent = `${p.name} ${p.is_default ? '(DEFAULT)' : ''} [${p.status_description}]`;
+              select.appendChild(opt);
+            });
+          }
+        } else if (data.type === 'job_status_changed') {
+          log(`🔔 LIVE PUSH EVENT: Job ${data.payload.id.substring(0,8)} status is now '${data.payload.status}'`);
+        }
+      };
+    }
+
+    function setAuthStatus(isAuth, text) {
+      const badge = document.getElementById('authBadge');
+      badge.textContent = text;
+      badge.className = isAuth ? 'status-badge paired' : 'status-badge disconnected';
+    }
+
+    function disconnectWS() {
+      if (ws) ws.close();
+    }
+
+    function requestPairing() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Not connected!');
+      const msg = { version: 1, id: `req_${reqId++}`, type: 'request_pairing', payload: { app_name: 'POS Web Console' } };
+      ws.send(JSON.stringify(msg));
+      log(`SENT: request_pairing`);
+    }
+
+    function confirmPairing() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Not connected!');
+      const code = document.getElementById('codeInput').value;
+      if (!code) return alert('Please enter 6-digit code');
+      const msg = { version: 1, id: `req_${reqId++}`, type: 'confirm_pairing', payload: { code: code } };
+      ws.send(JSON.stringify(msg));
+      log(`SENT: confirm_pairing with code ${code}`);
+    }
+
+    function authenticateToken() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Not connected!');
+      const token = document.getElementById('tokenInput').value;
+      if (!token) return alert('No token found');
+      const msg = { version: 1, id: `req_${reqId++}`, type: 'authenticate', payload: { token: token } };
+      ws.send(JSON.stringify(msg));
+      log(`SENT: authenticate with stored token`);
+      listPrinters();
+    }
+
+    function listPrinters() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Not connected!');
+      const msg = { version: 1, id: `req_${reqId++}`, type: 'list_printers' };
+      ws.send(JSON.stringify(msg));
+      log(`SENT: list_printers`);
+    }
+
+    function loadPreset() {
+      const preset = document.getElementById('sampleTemplate').value;
+      const input = document.getElementById('payloadInput');
+      if (preset === 'escpos') {
+        input.value = "PrintBridge ESC/POS Thermal Print\nOrder #1001\nTotal: $24.50\n\n\n";
+      } else if (preset === 'zpl') {
+        input.value = "^XA^FO50,50^A0N,50,50^FDPrintBridge ZPL Label^FS^XZ\n";
+      } else {
+        input.value = "Hello PrintBridge\n";
+      }
+    }
+
+    function sendPrint() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return alert('Not connected!');
+      const printer = document.getElementById('printerSelect').value;
+      const text = document.getElementById('payloadInput').value;
+      if (!printer) return alert('Please select a target printer first!');
+
+      const base64Data = btoa(text);
+      const msg = {
+        version: 1,
+        id: `req_${reqId++}`,
+        type: 'print',
+        payload: {
+          printer: printer,
+          data: base64Data,
+          job_name: 'Paired Browser Test Job',
+          token: savedToken
+        }
+      };
+
+      ws.send(JSON.stringify(msg));
+      log(`SENT: print job to ${printer}`);
+    }
+  </script>
+</body>
+</html>

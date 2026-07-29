@@ -1,0 +1,13 @@
+[Unit]
+Description=PrintBridge Local Agent Service
+After=network.target CUPS.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/printbridge-agent -headless
+Restart=on-failure
+RestartSec=5s
+User=root
+
+[Install]
+WantedBy=multi-user.target

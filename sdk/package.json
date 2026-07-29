@@ -1,0 +1,29 @@
+{
+  "name": "printbridge",
+  "version": "0.1.0",
+  "description": "TypeScript client SDK for PrintBridge local agent & printer bridge",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "global": "dist/index.global.js",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "node --test dist/index.js"
+  },
+  "keywords": [
+    "printbridge",
+    "printer",
+    "qz-tray",
+    "escpos",
+    "zpl",
+    "pos",
+    "websocket"
+  ],
+  "author": "PrintBridge",
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.0"
+  }
+}

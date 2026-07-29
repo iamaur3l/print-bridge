@@ -1,0 +1,13 @@
+{
+  "name": "printbridge-relay",
+  "version": "0.1.0",
+  "description": "Cloudflare Workers + Durable Objects Cloud Relay for PrintBridge",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.100.0"
+  }
+}

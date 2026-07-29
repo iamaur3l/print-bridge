@@ -1,0 +1,123 @@
+name: PrintBridge CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  test-agent:
+    name: Test Go Agent
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build Agent
+        run: |
+          cd agent
+          go build -v ./...
+      - name: Run Tests
+        run: |
+          cd agent
+          go test -v ./...
+
+  build-sdk:
+    name: Build TypeScript SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: sdk/package-lock.json
+      - name: Install & Build SDK
+        run: |
+          cd sdk
+          npm ci || npm install
+          npm run build
+
+  release:
+    name: Build Release Artifacts
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test-agent, build-sdk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: sdk/package-lock.json
+      - name: Cross-compile Agent Binaries
+        run: |
+          cd agent
+          mkdir -p dist
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/printbridge-agent-windows-amd64.exe .
+          GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/printbridge-agent-windows-arm64.exe .
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/printbridge-agent-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/printbridge-agent-darwin-arm64 .
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/printbridge-agent-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/printbridge-agent-linux-arm64 .
+      - name: Build SDK Package
+        run: |
+          cd sdk
+          npm ci || npm install
+          npm run build
+      - name: Generate SHA256 Checksums
+        run: |
+          cd agent/dist
+          for f in *; do
+            sha256sum "$f" > "$f.sha256"
+          done
+      - name: Generate Release Manifest
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "{\"version\":\"$VERSION\",\"release_date\":\"$(date -u +%Y-%m-%d)\"," > docs/release-manifest.json
+          echo '"platforms":{' >> docs/release-manifest.json
+          FIRST=true
+          for f in agent/dist/*.sha256; do
+            BASENAME=$(basename "$f" .sha256)
+            SHA=$(cat "$f" | cut -d' ' -f1)
+            KEY=""
+            case "$BASENAME" in
+              *windows-amd64*) KEY="windows_amd64"; URL="https://releases.printbridge.dev/agent/v$VERSION/$BASENAME" ;;
+              *windows-arm64*) KEY="windows_arm64"; URL="https://releases.printbridge.dev/agent/v$VERSION/$BASENAME" ;;
+              *darwin-amd64*) KEY="darwin_amd64"; URL="https://releases.printbridge.dev/agent/v$VERSION/$BASENAME" ;;
+              *darwin-arm64*) KEY="darwin_arm64"; URL="https://releases.printbridge.dev/agent/v$VERSION/$BASENAME" ;;
+              *linux-amd64*) KEY="linux_amd64"; URL="https://releases.printbridge.dev/agent/v$VERSION/$BASENAME" ;;
+              *linux-arm64*) KEY="linux_arm64"; URL="https://releases.printbridge.dev/agent/v$VERSION/$BASENAME" ;;
+            esac
+            if [ -n "$KEY" ]; then
+              if [ "$FIRST" = true ]; then FIRST=false; else echo "," >> docs/release-manifest.json; fi
+              echo "\"$KEY\":{\"url\":\"$URL\",\"sha256\":\"$SHA\"}" >> docs/release-manifest.json
+            fi
+          done
+          echo '}}' >> docs/release-manifest.json
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PrintBridge v${{ github.ref_name }}
+          body_path: docs/release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            agent/dist/*
+            sdk/dist/*
+            docs/release-manifest.json

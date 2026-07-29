@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PrintBridge SDK Web Integration Example</title>
+  <script src="../dist/index.global.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; padding: 24px; }
+    .card { background: #1e293b; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+    button { background: #0284c7; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; margin-right: 8px; }
+    button:hover { background: #0369a1; }
+    #log { background: #020617; padding: 12px; border-radius: 6px; font-family: monospace; height: 200px; overflow-y: auto; color: #38bdf8; }
+  </style>
+</head>
+<body>
+  <h1>🖨️ PrintBridge.js SDK Integration Example</h1>
+  
+  <div class="card">
+    <button onclick="initSDK()">Initialize SDK Client</button>
+    <button onclick="discoverPrinters()">Find Printers</button>
+    <button onclick="testPrint()">Print Sample ESC/POS</button>
+  </div>
+
+  <div class="card">
+    <h2>SDK Console Log</h2>
+    <div id="log">Click 'Initialize SDK Client'...</div>
+  </div>
+
+  <script>
+    let pb = null;
+
+    function log(msg) {
+      const logDiv = document.getElementById('log');
+      logDiv.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    async function initSDK() {
+      // Access PrintBridge SDK via global window.PrintBridge
+      pb = new PrintBridge.PrintBridgeClient({ host: 'localhost', port: 9567, autoConnect: false });
+      
+      pb.on('connected', () => log('SDK Connected to PrintBridge Agent'));
+      pb.on('disconnected', () => log('SDK Disconnected from Agent'));
+      pb.on('job_status_changed', (evt) => log(`Event: Job ${evt.id.substring(0,8)} is ${evt.status}`));
+      pb.on('printer_status_changed', (evt) => log(`Event: Printer ${evt.printer.printer_name} is ${evt.printer.status_description}`));
+
+      try {
+        await pb.connect();
+        log('SDK initialized and connected!');
+      } catch (err) {
+        log('Failed to connect SDK: ' + err.message);
+      }
+    }
+
+    async function discoverPrinters() {
+      if (!pb) return alert('Initialize SDK first!');
+      try {
+        const printers = await pb.printers.find();
+        log(`Discovered ${printers.length} printers: ` + printers.map(p => p.name).join(', '));
+      } catch (err) {
+        log('Error finding printers: ' + err.message);
+      }
+    }
+
+    async function testPrint() {
+      if (!pb) return alert('Initialize SDK first!');
+      try {
+        const printers = await pb.printers.find();
+        if (!printers.length) return alert('No printers available');
+        
+        const target = printers[0].name;
+        log(`Sending print job to ${target}...`);
+        const { jobId } = await pb.print(target, "Hello from PrintBridge.js SDK!\n\n\n", { jobName: "SDK Demo Job" });
+        log(`Print job enqueued with Job ID: ${jobId}`);
+      } catch (err) {
+        log('Print error: ' + err.message);
+      }
+    }
+  </script>
+</body>
+</html>

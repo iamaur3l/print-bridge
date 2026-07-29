@@ -1,0 +1,12 @@
+name = "printbridge-relay"
+main = "src/index.ts"
+compatibility_date = "2024-03-01"
+
+[durable_objects]
+bindings = [
+  { name = "AGENT_RELAY", class_name = "AgentRelayDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["AgentRelayDO"]

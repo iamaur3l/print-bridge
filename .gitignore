@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+*.exe
+*.exe.sha256
+*.bak
+.env
+agent/printtest
+agent/printtest.exe
+agent/agent.exe
+agent/dist/
+sdk/dist/
+sdk/node_modules/
+relay/node_modules/
