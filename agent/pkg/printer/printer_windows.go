@@ -4,7 +4,9 @@ package printer
 
 import (
 	"fmt"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -26,11 +28,40 @@ const (
 	PRINTER_ENUM_CONNECTIONS = 0x00000004
 
 	PRINTER_ATTRIBUTE_WORK_OFFLINE = 0x00000400
-	PRINTER_STATUS_OFFLINE         = 0x00000080
-	PRINTER_STATUS_ERROR           = 0x00000002
-	PRINTER_STATUS_PAPER_JAM       = 0x00000008
-	PRINTER_STATUS_PAPER_OUT       = 0x00000010
+
+	PRINTER_STATUS_PAUSED            = 0x00000001
+	PRINTER_STATUS_ERROR             = 0x00000002
+	PRINTER_STATUS_PENDING_DELETION  = 0x00000004
+	PRINTER_STATUS_PAPER_JAM         = 0x00000008
+	PRINTER_STATUS_PAPER_OUT         = 0x00000010
+	PRINTER_STATUS_MANUAL_FEED       = 0x00000020
+	PRINTER_STATUS_PAPER_PROBLEM     = 0x00000040
+	PRINTER_STATUS_OFFLINE           = 0x00000080
+	PRINTER_STATUS_OUTPUT_BIN_FULL   = 0x00000800
+	PRINTER_STATUS_NOT_AVAILABLE     = 0x00001000
+	PRINTER_STATUS_NO_TONER          = 0x00040000
+	PRINTER_STATUS_USER_INTERVENTION = 0x00100000
+	PRINTER_STATUS_DOOR_OPEN         = 0x00400000
+	PRINTER_STATUS_SERVER_UNKNOWN    = 0x00800000
 )
+
+// statusEvidence converts raw PRINTER_INFO_2 fields into corroboration evidence.
+func statusEvidence(info *PRINTER_INFO_2W, printerName string) StatusEvidence {
+	return StatusEvidence{
+		WorkOfflineAttr:  info.Attributes&PRINTER_ATTRIBUTE_WORK_OFFLINE != 0,
+		OfflineBit:       info.Status&PRINTER_STATUS_OFFLINE != 0,
+		Paused:           info.Status&PRINTER_STATUS_PAUSED != 0,
+		ErrorBit:         info.Status&PRINTER_STATUS_ERROR != 0,
+		PaperJam:         info.Status&PRINTER_STATUS_PAPER_JAM != 0,
+		PaperOut:         info.Status&PRINTER_STATUS_PAPER_OUT != 0,
+		NoToner:          info.Status&PRINTER_STATUS_NO_TONER != 0,
+		UserIntervention: info.Status&PRINTER_STATUS_USER_INTERVENTION != 0,
+		DoorOpen:         info.Status&PRINTER_STATUS_DOOR_OPEN != 0,
+		// An unreachable print server is real corroboration, not a stale flag.
+		NotAvailable: info.Status&(PRINTER_STATUS_NOT_AVAILABLE|PRINTER_STATUS_SERVER_UNKNOWN) != 0,
+		LastWriteOK:  LastSuccessfulWrite(printerName),
+	}
+}
 
 type PRINTER_INFO_2W struct {
 	PServerName         *uint16
@@ -116,42 +147,97 @@ func ListPrinters() ([]PrinterInfo, error) {
 		return nil, fmt.Errorf("EnumPrintersW failed: %w", err)
 	}
 
-	printers := make([]PrinterInfo, 0, returned)
+	type queueEntry struct {
+		info      *PRINTER_INFO_2W
+		name      string
+		driver    string
+		port      string
+		target    NetworkTarget
+		isNetwork bool
+	}
+
 	infoSize := unsafe.Sizeof(PRINTER_INFO_2W{})
+	entries := make([]queueEntry, 0, returned)
 
 	for i := uint32(0); i < returned; i++ {
 		info := (*PRINTER_INFO_2W)(unsafe.Pointer(&buffer[uintptr(i)*infoSize]))
 
-		name := syscall.UTF16ToString((*[1 << 16]uint16)(unsafe.Pointer(info.PPrinterName))[:])
-		driver := ""
+		entry := queueEntry{
+			info: info,
+			name: syscall.UTF16ToString((*[1 << 16]uint16)(unsafe.Pointer(info.PPrinterName))[:]),
+		}
 		if info.PDriverName != nil {
-			driver = syscall.UTF16ToString((*[1 << 16]uint16)(unsafe.Pointer(info.PDriverName))[:])
+			entry.driver = syscall.UTF16ToString((*[1 << 16]uint16)(unsafe.Pointer(info.PDriverName))[:])
 		}
-		port := ""
 		if info.PPortName != nil {
-			port = syscall.UTF16ToString((*[1 << 16]uint16)(unsafe.Pointer(info.PPortName))[:])
+			entry.port = syscall.UTF16ToString((*[1 << 16]uint16)(unsafe.Pointer(info.PPortName))[:])
 		}
 
-		isOffline := (info.Attributes&PRINTER_ATTRIBUTE_WORK_OFFLINE != 0) || (info.Status&PRINTER_STATUS_OFFLINE != 0)
-		statusDesc := "Ready"
-		if isOffline {
-			statusDesc = "Offline"
-		} else if info.Status&PRINTER_STATUS_ERROR != 0 {
-			statusDesc = "Error"
-		} else if info.Status&PRINTER_STATUS_PAPER_JAM != 0 {
-			statusDesc = "Paper Jam"
-		} else if info.Status&PRINTER_STATUS_PAPER_OUT != 0 {
-			statusDesc = "Paper Out"
+		// A queue on a TCP port can be probed and, when printing, written to
+		// directly — which takes the spooler and its stale offline flags out of the
+		// path entirely.
+		if target, ok := ParseNetworkPort(entry.port); ok {
+			entry.target, entry.isNetwork = target, true
 		}
 
-		printers = append(printers, PrinterInfo{
-			Name:              name,
-			DriverName:        driver,
-			PortName:          port,
-			IsDefault:         name == defaultPrinterName,
-			IsOnline:          !isOffline,
-			StatusDescription: statusDesc,
-		})
+		entries = append(entries, entry)
+	}
+
+	// Probe network printers in parallel with a short deadline. The result is cached
+	// by the shared snapshot, so this cost is paid at most once per refresh.
+	reachable := make(map[string]*bool, len(entries))
+	var probeMu sync.Mutex
+	var probes sync.WaitGroup
+
+	for _, e := range entries {
+		if !e.isNetwork {
+			continue
+		}
+
+		probes.Add(1)
+		go func(e queueEntry) {
+			defer probes.Done()
+
+			ok := ProbeNetworkTarget(e.target, DefaultProbeTimeout) == nil
+
+			probeMu.Lock()
+			reachable[e.name] = &ok
+			probeMu.Unlock()
+		}(e)
+	}
+	probes.Wait()
+
+	printers := make([]PrinterInfo, 0, len(entries))
+
+	for _, e := range entries {
+		// Never trust a single signal: the WorkOffline flag is routinely stale on
+		// USB thermal printers, so an offline verdict needs a real fault, a
+		// physically absent port, an unreachable transport, or a failed write — and
+		// a completed write or a successful probe overrides everything the spooler
+		// says.
+		evidence := statusEvidence(e.info, e.name)
+		evidence.Reachable = reachable[e.name]
+
+		verdict := EvaluateStatus(evidence, time.Now())
+
+		pi := PrinterInfo{
+			Name:              e.name,
+			DriverName:        e.driver,
+			PortName:          e.port,
+			IsDefault:         e.name == defaultPrinterName,
+			IsOnline:          verdict.State == StateOnline,
+			State:             string(verdict.State),
+			StatusDescription: verdict.Description,
+			StatusDetail:      verdict.Detail,
+			StaleWorkOffline:  verdict.StaleFlags,
+			Type:              "local",
+		}
+		if e.isNetwork {
+			pi.Type = "network"
+			pi.NetworkAddress = e.target.Address()
+		}
+
+		printers = append(printers, pi)
 	}
 
 	return printers, nil
@@ -214,6 +300,10 @@ func PrintRaw(printerName string, data []byte, jobName string) error {
 	if ret == 0 || written != uint32(len(data)) {
 		return fmt.Errorf("WritePrinter failed (wrote %d/%d bytes): %w", written, len(data), err)
 	}
+
+	// The write completed, so this printer is reachable no matter what the
+	// spooler's status flags claim about it.
+	RecordSuccessfulWrite(printerName)
 
 	return nil
 }

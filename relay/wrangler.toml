@@ -1,6 +1,27 @@
+# PrintBridge Cloud Relay.
+#
+# SQLite-backed Durable Objects. The `new_sqlite_classes` migration is required: Workers
+# KV-backed Durable Object namespaces can no longer be created (gradual rollout finished
+# in 2026), so a fresh deploy must declare the SQLite storage backend.
+#
+# If you had already deployed the old `new_classes` config, do not reuse tag v1 — deploy
+# a new tag instead, or simply recreate the namespace (the relay holds only 24 hour job
+# records, there is nothing to preserve).
+
 name = "printbridge-relay"
 main = "src/index.ts"
-compatibility_date = "2024-03-01"
+compatibility_date = "2026-09-01"
+
+[observability]
+enabled = true
+
+# Per-agent secrets: key = agent id, value = SHA-256 hex of that agent's secret.
+# Create it with:  npx wrangler kv namespace create AGENT_SECRETS
+# Then paste the printed id below. Without this binding the relay refuses every agent
+# connection with "agent authentication is not configured" (it fails closed on purpose).
+[[kv_namespaces]]
+binding = "AGENT_SECRETS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 
 [durable_objects]
 bindings = [
@@ -9,4 +30,5 @@ bindings = [
 
 [[migrations]]
 tag = "v1"
-new_classes = ["AgentRelayDO"]
+new_sqlite_classes = ["AgentRelayDO"]
+

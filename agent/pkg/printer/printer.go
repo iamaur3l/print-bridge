@@ -7,12 +7,25 @@ import (
 
 // PrinterInfo represents system printer metadata.
 type PrinterInfo struct {
-	Name              string `json:"name"`
-	DriverName        string `json:"driver_name"`
-	PortName          string `json:"port_name"`
-	IsDefault         bool   `json:"is_default"`
-	IsOnline          bool   `json:"is_online"`
+	Name       string `json:"name"`
+	DriverName string `json:"driver_name"`
+	PortName   string `json:"port_name"`
+	IsDefault  bool   `json:"is_default"`
+	IsOnline   bool   `json:"is_online"`
+	// State is the corroborated verdict: "online", "offline" or "unknown".
+	// "unknown" exists so a stale spooler flag never libels a working printer.
+	State string `json:"state,omitempty"`
+	// StatusDescription is the human-readable label for State.
 	StatusDescription string `json:"status_description,omitempty"`
+	// StatusDetail explains how the verdict was reached.
+	StatusDetail string `json:"status_detail,omitempty"`
+	// StaleWorkOffline reports a spooler offline flag that was contradicted.
+	StaleWorkOffline bool `json:"stale_work_offline,omitempty"`
+	// Type is "local" (printed through the OS spooler) or "network" (written
+	// directly to the printer's TCP RAW port).
+	Type string `json:"type,omitempty"`
+	// NetworkAddress is "host:port" for network printers.
+	NetworkAddress string `json:"network_address,omitempty"`
 }
 
 // Common errors

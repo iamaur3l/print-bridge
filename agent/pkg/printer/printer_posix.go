@@ -38,7 +38,10 @@ func ListPrinters() ([]PrinterInfo, error) {
 			PortName:          "CUPS",
 			IsDefault:         name == defaultPrinter,
 			IsOnline:          true,
+			State:             string(StateOnline),
 			StatusDescription: "Ready",
+			StatusDetail:      "CUPS reports the queue as available",
+			Type:              "local",
 		})
 	}
 
@@ -65,6 +68,8 @@ func PrintRaw(printerName string, data []byte, jobName string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("lpr raw print error: %w (stderr: %s)", err, strings.TrimSpace(errBuf.String()))
 	}
+
+	RecordSuccessfulWrite(printerName)
 
 	return nil
 }

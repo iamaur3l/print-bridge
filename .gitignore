@@ -12,3 +12,4 @@ agent/dist/
 sdk/dist/
 sdk/node_modules/
 relay/node_modules/
+relay/.wrangler/

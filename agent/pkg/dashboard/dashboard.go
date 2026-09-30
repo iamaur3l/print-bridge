@@ -56,7 +56,7 @@ func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Dashboard) handleSummary(w http.ResponseWriter, r *http.Request) {
-	printers, err := printer.ListPrinters()
+	printers, err := printer.ListPrintersCached()
 	if err != nil || printers == nil {
 		printers = []printer.PrinterInfo{}
 	}

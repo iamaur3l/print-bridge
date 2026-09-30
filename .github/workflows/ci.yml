@@ -2,10 +2,10 @@ name: PrintBridge CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ master, main, develop ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ main ]
+    branches: [ master, main ]
 
 permissions:
   contents: write
@@ -22,15 +22,17 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          # Single source of truth: the version the module declares.
+          go-version-file: agent/go.mod
       - name: Build Agent
         run: |
           cd agent
           go build -v ./...
+          go vet ./...
       - name: Run Tests
         run: |
           cd agent
-          go test -v ./...
+          go test -count=1 ./...
 
   build-sdk:
     name: Build TypeScript SDK
@@ -48,6 +50,31 @@ jobs:
           cd sdk
           npm ci || npm install
           npm run build
+
+  test-relay:
+    name: Test Cloud Relay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The relay's tests rely on unflagged TypeScript type stripping (Node 23.6+).
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: relay/package-lock.json
+      - name: Install
+        run: |
+          cd relay
+          npm ci
+      - name: Typecheck and unit tests
+        run: |
+          cd relay
+          npm run check
+      - name: Verify the deploy bundles
+        run: |
+          cd relay
+          npm run deploy:dry-run
 
   release:
     name: Build Release Artifacts

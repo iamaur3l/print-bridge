@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrintBridge — checkout printing example</title>
+<!--
+  A complete integration in one file. It is deliberately noisy: every step logs what it
+  sent and what came back, so the log panel doubles as an integration checklist.
+
+  Serve it over HTTP from the repository root (python -m http.server 8080) and open
+  http://localhost:8080/examples/checkout-print.html on the till, or open the file
+  directly — a file:// page can load the global build below.
+-->
+<script src="../sdk/dist/index.global.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0f172a;
+         color: #f8fafc; padding: 24px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 20px; } h2 { font-size: 15px; color: #94a3b8; margin: 0 0 8px; }
+  .card { background: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 14px; }
+  button { background: #0284c7; color: white; border: none; padding: 8px 14px; border-radius: 6px;
+           cursor: pointer; font-weight: 600; margin: 0 6px 6px 0; }
+  button:hover { background: #0369a1; }
+  input, select { background: #0f172a; color: #f8fafc; border: 1px solid #334155;
+                  border-radius: 6px; padding: 7px 9px; margin-right: 6px; }
+  #status { padding: 8px 12px; border-radius: 6px; background: #334155; font-weight: 600;
+            display: inline-block; }
+  #status.ready { background: #166534; } #status.down { background: #7f1d1d; }
+  #hint { margin-top: 10px; color: #fca5a5; font-size: 13px; }
+  #log { background: #020617; padding: 12px; border-radius: 6px; font-family: ui-monospace, monospace;
+         font-size: 12px; height: 230px; overflow-y: auto; color: #38bdf8; white-space: pre-wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #334155; }
+  .online { color: #4ade80; } .offline { color: #f87171; } .unknown { color: #fbbf24; }
+  .muted { color: #94a3b8; }
+</style>
+</head>
+<body>
+  <h1>PrintBridge — checkout printing example</h1>
+
+  <div class="card">
+    <h2>1. Connection</h2>
+    <div id="status">not connected</div>
+    <div id="hint"></div>
+    <p>
+      <button onclick="connect()">Connect</button>
+      <button onclick="checkAgent()">Why is it not working?</button>
+      <button onclick="disconnect()">Disconnect</button>
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>2. Pair this site with the till (once)</h2>
+    <p class="muted">The code is shown in the PrintBridge tray icon and at
+      <a href="http://localhost:9567/dashboard" target="_blank">localhost:9567/dashboard</a> —
+      it is never sent to this page.</p>
+    <p>
+      <button onclick="requestPairing()">Request a code</button>
+      <input id="pairingCode" placeholder="6-digit code" size="10" inputmode="numeric">
+      <button onclick="confirmPairing()">Pair</button>
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>3. What can this till print?</h2>
+    <p>
+      <button onclick="loadStations()">Refresh stations</button>
+      <button onclick="testSlip()">Print a test slip to the selected role</button>
+      <button onclick="openDrawer()">Open the cash drawer</button>
+    </p>
+    <table id="stations"><thead><tr><th>Role</th><th>Printer</th><th>Resolved</th><th>State</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>4. Print an order</h2>
+    <p>
+      <input id="orderId" value="1042" size="6">
+      <select id="role"></select>
+      <button onclick="printReceipt()">Print receipt</button>
+      <button onclick="printReceipt(true)">Print again (same idempotency key)</button>
+    </p>
+    <table id="jobs"><thead><tr><th>Job</th><th>Order</th><th>Status</th><th>Detail</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>5. Queue</h2>
+    <p>
+      <button onclick="refreshQueue()">Refresh queue</button>
+      <button onclick="pauseQueue()">Pause</button>
+      <button onclick="resumeQueue()">Resume</button>
+    </p>
+    <div id="queueState" class="muted">not checked yet</div>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </div>
+
+<script>
+  // ---------------------------------------------------------------- utilities
+  const logEl = document.getElementById('log');
+  function log(message, kind) {
+    const line = document.createElement('div');
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    if (kind === 'error') line.style.color = '#f87171';
+    if (kind === 'ok') line.style.color = '#4ade80';
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log('[checkout]', message);
+  }
+
+  function setStatus(text, ready) {
+    const el = document.getElementById('status');
+    el.textContent = text;
+    el.className = ready === undefined ? '' : (ready ? 'ready' : 'down');
+  }
+
+  function showHint(text) { document.getElementById('hint').textContent = text || ''; }
+
+  // ---------------------------------------------------------------- the client
+  // autoConnect: false, so the page can show what "not connected" looks like first.
+  const pb = new PrintBridge.PrintBridgeClient({
+    host: 'localhost',
+    port: 9567,
+    autoConnect: false,
+    requestTimeout: 15000
+  });
+
+  pb.on('connected', () => { setStatus('connected to ' + pb.url, true); showHint(''); log('connected', 'ok'); });
+  pb.on('disconnected', () => { setStatus('disconnected', false); log('disconnected', 'error'); });
+  pb.on('error', (err) => log(`error ${err.code}: ${err.message}`, 'error'));
+
+  // The outcome of every job arrives here — the print call only confirms it was accepted.
+  pb.on('job_status_changed', (job) => {
+    updateJobRow(job.id, job.status, job.error_message || '');
+    log(`job ${job.id.slice(0, 8)} -> ${job.status}${job.error_message ? ': ' + job.error_message : ''}`,
+        job.status === 'failed' ? 'error' : 'ok');
+  });
+  pb.on('printer_status_changed', (evt) => log(`printer ${evt.printer.printer_name}: ${evt.printer.status_description}`));
+
+  async function connect() {
+    try {
+      await pb.connect();
+    } catch (err) {
+      // connect() rejects only when the socket could not be opened at all.
+      log(`connect failed: ${err.code} ${err.message}`, 'error');
+    }
+    if (!pb.connected) await checkAgent();
+  }
+
+  function disconnect() { pb.disconnect(); }
+
+  // The one call that explains "the button does nothing".
+  async function checkAgent() {
+    const diag = await pb.diagnose();
+    log(`url=${diag.url} connected=${diag.connected} secure=${diag.secure} localNetwork=${diag.localNetworkPermission}`);
+    showHint(diag.hint);
+    log(diag.hint, 'error');
+  }
+
+  // ---------------------------------------------------------------- pairing
+  async function requestPairing() {
+    try {
+      const res = await pb.pairing.request('Checkout example');
+      log(`pairing code requested: ${JSON.stringify(res)} — read it from the tray or the dashboard`, 'ok');
+    } catch (err) {
+      log(`request_pairing failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function confirmPairing() {
+    const code = document.getElementById('pairingCode').value.trim();
+    if (!code) return log('enter the 6-digit code first', 'error');
+    try {
+      await pb.pairing.confirm(code);
+      log(`paired; token stored for this origin (${pb.pairing.isPaired()})`, 'ok');
+      await loadStations();
+    } catch (err) {
+      log(`pairing failed: ${err.message}`, 'error');
+    }
+  }
+
+  // ---------------------------------------------------------------- stations
+  let roles = [];
+
+  async function loadStations() {
+    if (!pb.connected) return log('connect first', 'error');
+
+    try {
+      roles = await pb.roles.list();
+      const tbody = document.querySelector('#stations tbody');
+      const select = document.getElementById('role');
+      tbody.innerHTML = '';
+      select.innerHTML = '';
+
+      for (const role of roles) {
+        const row = document.createElement('tr');
+        // state is online | offline | unknown. 'unknown' means the spooler claimed offline
+        // but nothing corroborated it, so it is not a broken printer.
+        row.innerHTML = `<td>${role.role}</td><td>${role.printer_name}</td>` +
+          `<td>${role.resolved ? 'yes' : 'no - not installed'}</td>` +
+          `<td class="${role.state || ''}">${role.state || '?'} <span class="muted">${role.detail || ''}</span></td>`;
+        tbody.appendChild(row);
+
+        const option = document.createElement('option');
+        option.value = role.role;
+        option.textContent = role.role;
+        select.appendChild(option);
+      }
+
+      if (roles.length === 0) {
+        log('no roles are assigned on this till yet - assign one at http://localhost:9567/dashboard', 'error');
+      } else {
+        log(`${roles.length} role(s): ` + roles.map((r) => `${r.role}->${r.printer_name}(${r.state})`).join(', '), 'ok');
+      }
+
+      for (const printer of await pb.printers.find()) {
+        log(`printer ${printer.name} [${printer.type || 'local'}] ${printer.state}: ${printer.status_detail || ''}`);
+      }
+    } catch (err) {
+      log(`could not list stations: ${err.code} ${err.message}`, 'error');
+    }
+  }
+
+  function selectedRole() { return roles.find((r) => r.role === document.getElementById('role').value); }
+
+  async function testSlip() {
+    const role = selectedRole();
+    if (!role) return log('pick a role first', 'error');
+    try {
+      // Built from the role's capability profile, so it never sends a command the printer
+      // cannot handle. If this prints and your own bytes do not, the difference is your bytes.
+      await pb.testPrint({ role: role.role, slip: role.role === 'kitchen' ? 'kitchen' : 'receipt' });
+      log(`test slip queued to ${role.role}`, 'ok');
+    } catch (err) {
+      log(`test print failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function openDrawer() {
+    const role = selectedRole();
+    if (!role) return log('pick a role first', 'error');
+    try {
+      await pb.devices.openDrawer(role.printer_name, { pin: 2, brand: 'epson' });
+      log(`drawer kick sent via ${role.printer_name} (pin 2)`, 'ok');
+    } catch (err) {
+      log(`open drawer failed: ${err.message}`, 'error');
+    }
+  }
+
+  // ---------------------------------------------------------------- printing
+  const ESC = 0x1b, GS = 0x1d;
+
+  /**
+   * A minimal ESC/POS receipt. 32 columns suits a 58 mm printer; use 42-48 for 80 mm.
+   * Padding lives in the receipt builder, not in the browser's layout - that is what
+   * makes a thermal receipt readable.
+   */
+  function buildReceipt(orderId, lines) {
+    const out = [ESC, 0x40];                                        // initialise
+    out.push(ESC, 0x61, 0x01);                                      // centre
+    out.push(ESC, 0x45, 0x01, ...new TextEncoder().encode('ACME STORE\n'), ESC, 0x45, 0x00);
+    out.push(ESC, 0x61, 0x00);                                      // left
+    for (const line of lines) out.push(...new TextEncoder().encode(line + '\n'));
+    out.push(...new TextEncoder().encode(`\nOrder ${orderId}`));
+    out.push(0x0a, 0x0a, 0x0a, GS, 0x56, 0x41, 0x00);               // feed, then full cut
+    return new Uint8Array(out);
+  }
+
+  async function printReceipt(again) {
+    const role = selectedRole();
+    if (!role) return log('pick a role first', 'error');
+
+    const orderId = document.getElementById('orderId').value.trim() || '0';
+    const lines = ['2x Coffee          7.00', '1x Croissant       3.50', '----------------', 'Total             10.50'];
+
+    try {
+      const { jobId, duplicate } = await pb.printToRole(role.role, buildReceipt(orderId, lines), {
+        jobName: `Order ${orderId}`,
+        // Always derived from the order id: a retry then reuses the original job instead of
+        // printing a second receipt. Press "print again" to watch duplicate come back true.
+        idempotencyKey: `order-${orderId}`,
+        priority: 0
+      });
+
+      log(duplicate
+        ? `order ${orderId} was already queued as job ${jobId} - nothing printed twice`
+        : `order ${orderId} accepted as job ${jobId} (queued, not printed yet)`, 'ok');
+
+      addJobRow(jobId, orderId, 'queued', duplicate ? 'duplicate: the original job was reused' : '');
+      await refreshQueue();
+    } catch (err) {
+      log(`print failed: ${err.code} ${err.message}`, 'error');
+      if (err.code === 'pairing_required') log('pair this site first (section 2 above)', 'error');
+    }
+  }
+
+  function addJobRow(jobId, orderId, status, detail) {
+    const row = document.createElement('tr');
+    row.id = 'job-' + jobId;
+    row.innerHTML = `<td class="muted">${jobId.slice(0, 8)}</td><td>${orderId}</td>` +
+                    `<td class="js-status">${status}</td><td class="js-detail muted">${detail}</td>`;
+    document.querySelector('#jobs tbody').prepend(row);
+  }
+
+  function updateJobRow(jobId, status, detail) {
+    const row = document.getElementById('job-' + jobId);
+    if (!row) return;
+    const cell = row.querySelector('.js-status');
+    cell.textContent = status;
+    cell.className = 'js-status ' +
+      (status === 'success' ? 'online' : status === 'failed' ? 'offline' : 'unknown');
+    if (detail) row.querySelector('.js-detail').textContent = detail;
+  }
+
+  // ---------------------------------------------------------------- queue
+  async function refreshQueue() {
+    if (!pb.connected) return;
+    try {
+      const { paused, counts } = await pb.queue.status();
+      document.getElementById('queueState').textContent =
+        `${paused ? 'PAUSED - ' : ''}queued ${counts.queued}, sending ${counts.sending}, ` +
+        `retrying ${counts.retrying}, failed ${counts.failed}, total ${counts.total}`;
+    } catch (err) {
+      log(`queue_status failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function pauseQueue() { await pb.queue.pause(); log('queue paused', 'ok'); await refreshQueue(); }
+  async function resumeQueue() { await pb.queue.resume(); log('queue resumed', 'ok'); await refreshQueue(); }
+
+  // Poll the queue while the page is open, so a stuck job is visible without a reload.
+  setInterval(refreshQueue, 5000);
+</script>
+</body>
+</html>

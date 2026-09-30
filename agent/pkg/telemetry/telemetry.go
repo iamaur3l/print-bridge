@@ -12,12 +12,21 @@ import (
 )
 
 type PrinterHealth struct {
-	PrinterName       string    `json:"printer_name"`
-	DriverName        string    `json:"driver_name"`
-	PortName          string    `json:"port_name"`
-	IsOnline          bool      `json:"is_online"`
-	StatusDescription string    `json:"status_description"`
-	LastSeenAt        time.Time `json:"last_seen_at"`
+	PrinterName string `json:"printer_name"`
+	DriverName  string `json:"driver_name"`
+	PortName    string `json:"port_name"`
+	IsOnline    bool   `json:"is_online"`
+	// State is "online", "offline" or "unknown" — "unknown" means the spooler
+	// reported offline but nothing corroborated it (a stale WorkOffline flag on a
+	// working USB printer is the common case).
+	State string `json:"state,omitempty"`
+	// StatusDescription is the human-readable label for State.
+	StatusDescription string `json:"status_description"`
+	// StatusDetail explains how the verdict was reached.
+	StatusDetail string `json:"status_detail,omitempty"`
+	// StaleWorkOffline marks spooler offline flags that were contradicted.
+	StaleWorkOffline bool      `json:"stale_work_offline,omitempty"`
+	LastSeenAt       time.Time `json:"last_seen_at"`
 }
 
 type Event struct {
@@ -52,7 +61,7 @@ func NewMonitor(store *queue.Store, interval time.Duration) *Monitor {
 		cancel:      cancel,
 		lastState:   make(map[string]PrinterHealth),
 		subscribers: make(map[chan Event]struct{}),
-		listFunc:    printer.ListPrinters,
+		listFunc:    printer.ListPrintersCached,
 	}
 }
 
@@ -137,13 +146,16 @@ func (m *Monitor) PollOnce() {
 			DriverName:        p.DriverName,
 			PortName:          p.PortName,
 			IsOnline:          p.IsOnline,
+			State:             p.State,
 			StatusDescription: p.StatusDescription,
+			StatusDetail:      p.StatusDetail,
+			StaleWorkOffline:  p.StaleWorkOffline,
 			LastSeenAt:        now,
 		}
 		freshMap[p.Name] = ph
 
 		prev, exists := m.lastState[p.Name]
-		if !exists || prev.IsOnline != ph.IsOnline || prev.StatusDescription != ph.StatusDescription {
+		if !exists || prev.IsOnline != ph.IsOnline || prev.StatusDescription != ph.StatusDescription || prev.State != ph.State {
 			log.Printf("[Telemetry] Printer %q status changed: %s -> %s (Online: %t)",
 				p.Name, prev.StatusDescription, ph.StatusDescription, ph.IsOnline)
 
@@ -176,13 +188,15 @@ func (m *Monitor) saveTelemetry(ph PrinterHealth) {
 		return
 	}
 	query := `
-	INSERT INTO printer_telemetry (printer_name, driver_name, port_name, is_online, status_description, last_seen_at)
-	VALUES (?, ?, ?, ?, ?, ?)
+	INSERT INTO printer_telemetry (printer_name, driver_name, port_name, is_online, state, status_description, status_detail, last_seen_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(printer_name) DO UPDATE SET
 		driver_name = excluded.driver_name,
 		port_name = excluded.port_name,
 		is_online = excluded.is_online,
+		state = excluded.state,
 		status_description = excluded.status_description,
+		status_detail = excluded.status_detail,
 		last_seen_at = excluded.last_seen_at
 	`
 	isOnlineInt := 0
@@ -194,7 +208,9 @@ func (m *Monitor) saveTelemetry(ph PrinterHealth) {
 		ph.DriverName,
 		ph.PortName,
 		isOnlineInt,
+		ph.State,
 		ph.StatusDescription,
+		ph.StatusDetail,
 		ph.LastSeenAt.Format(time.RFC3339),
 	)
 }
@@ -212,7 +228,7 @@ func (m *Monitor) GetHealth() ([]PrinterHealth, error) {
 		return result, nil
 	}
 
-	query := `SELECT printer_name, driver_name, port_name, is_online, status_description, last_seen_at FROM printer_telemetry`
+	query := `SELECT printer_name, driver_name, port_name, is_online, state, status_description, status_detail, last_seen_at FROM printer_telemetry`
 	rows, err := m.store.DB().Query(query)
 	if err != nil {
 		return nil, err
@@ -223,16 +239,18 @@ func (m *Monitor) GetHealth() ([]PrinterHealth, error) {
 	for rows.Next() {
 		var ph PrinterHealth
 		var isOnlineInt int
-		var lastSeenStr sql.NullString
+		var stateStr, detailStr, lastSeenStr sql.NullString
 
-		if err := rows.Scan(&ph.PrinterName, &ph.DriverName, &ph.PortName, &isOnlineInt, &ph.StatusDescription, &lastSeenStr); err != nil {
+		if err := rows.Scan(&ph.PrinterName, &ph.DriverName, &ph.PortName, &isOnlineInt, &stateStr, &ph.StatusDescription, &detailStr, &lastSeenStr); err != nil {
 			return nil, err
 		}
 		ph.IsOnline = isOnlineInt == 1
+		ph.State = stateStr.String
+		ph.StatusDetail = detailStr.String
 		if lastSeenStr.Valid {
 			ph.LastSeenAt, _ = time.Parse(time.RFC3339, lastSeenStr.String)
 		}
 		result = append(result, ph)
 	}
-	return result, nil
+	return result, rows.Err()
 }

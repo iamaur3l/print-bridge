@@ -189,6 +189,15 @@ func (m *Manager) ValidateToken(token, origin string) (bool, *PairedApp) {
 		return false, nil
 	}
 
+	// A token is only valid for the origin it was issued to. This stops a token
+	// handed to one web application from being replayed by any other origin that
+	// can reach the loopback agent.
+	if app.Origin != origin {
+		_ = m.store.LogAuditEvent(queue.AuditTokenRejected, origin, app.AppName,
+			fmt.Sprintf("token issued to origin %q presented from origin %q", app.Origin, origin), "")
+		return false, nil
+	}
+
 	_ = m.store.LogAuditEvent(queue.AuditTokenValidated, origin, app.AppName, "token validated successfully", "")
 
 	// Update last_used_at timestamp asynchronously

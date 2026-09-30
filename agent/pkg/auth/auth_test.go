@@ -125,3 +125,39 @@ func TestTokenRevocation(t *testing.T) {
 		t.Errorf("expected token to be invalid after revocation")
 	}
 }
+
+func TestTokenIsBoundToItsOrigin(t *testing.T) {
+	store, err := queue.NewStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create memory store: %v", err)
+	}
+	defer store.Close()
+
+	authMgr, err := NewManager(store)
+	if err != nil {
+		t.Fatalf("failed to create auth manager: %v", err)
+	}
+
+	origin := "https://pos.myrestaurant.com"
+	code, _, _ := authMgr.RequestPairing("My POS App", origin)
+	app, err := authMgr.ConfirmPairing(code, origin)
+	if err != nil {
+		t.Fatalf("ConfirmPairing failed: %v", err)
+	}
+
+	if valid, _ := authMgr.ValidateToken(app.Token, origin); !valid {
+		t.Fatal("expected the token to be valid for the origin it was issued to")
+	}
+
+	// A token handed to one web application must not be replayable by another
+	// page that can also reach the loopback agent.
+	if valid, _ := authMgr.ValidateToken(app.Token, "https://evil.example"); valid {
+		t.Error("token must not be valid from a different origin")
+	}
+
+	// Non-browser clients normalise an absent Origin header to http://localhost,
+	// which is a different origin to the one the token was issued to.
+	if valid, _ := authMgr.ValidateToken(app.Token, "http://localhost"); valid {
+		t.Error("token must not be valid from the loopback default origin")
+	}
+}
